@@ -4,6 +4,7 @@
  *
  *   node flash-sale-load.mjs --strategy ATOMIC_UPDATE --requests 20000 --concurrency 500
  *   node flash-sale-load.mjs --all          # chạy lần lượt mọi strategy và in bảng so sánh
+ *   node flash-sale-load.mjs --all --warmup 0   # bỏ warm-up (mặc định 10000 request)
  *
  * Mỗi lượt: reset kho -> bắn N request (mỗi request 1 user khác nhau) với C request song song
  * -> đo latency p50/p95/p99, throughput -> đọc lại DB để kiểm tra có bán lố hay không.
@@ -23,6 +24,9 @@ function parseArgs(argv) {
     concurrency: 500,
     strategy: 'ATOMIC_UPDATE',
     all: false,
+    // JVM vừa khởi động chạy chậm hơn nhiều (JIT chưa biên dịch code nóng, pool chưa đầy).
+    // Không warm-up thì strategy chạy đầu tiên luôn bị thiệt => so sánh sai.
+    warmup: 10000,
   };
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i].replace(/^--/, '');
@@ -110,6 +114,12 @@ function printTable(results) {
 const opts = parseArgs(process.argv.slice(2));
 const strategies = opts.all ? STRATEGIES : [opts.strategy];
 console.log(`Target ${opts.base} | item=${opts.item} stock=${opts.stock} requests=${opts.requests} concurrency=${opts.concurrency}`);
+
+if (opts.warmup > 0) {
+  process.stdout.write(`Warm-up ${opts.warmup} requests (bỏ kết quả)... `);
+  const w = await runOnce({ ...opts, requests: opts.warmup }, 'ATOMIC_UPDATE');
+  console.log(`${w.throughputRps} req/s`);
+}
 
 const results = [];
 for (const s of strategies) {
