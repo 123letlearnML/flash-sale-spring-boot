@@ -150,7 +150,7 @@ UPDATE flash_sale_item
 | SYNCHRONIZED | ❌ | ❌ | thấp | không bao giờ |
 | PESSIMISTIC | ✅ | ✅ | thấp | tranh chấp cao, logic phức tạp cần đọc rồi quyết định |
 | OPTIMISTIC | ✅ | ✅ | rất thấp khi tranh chấp cao | tranh chấp thấp |
-| ATOMIC_UPDATE | ✅ | ✅ | cao | điều kiện viết được trong 1 câu SQL |
+| ATOMIC_UPDATE | ✅ | ✅ | cao (đo thực tế: ngang PESSIMISTIC, xem mục 10) | điều kiện viết được trong 1 câu SQL |
 
 ---
 
@@ -215,6 +215,13 @@ Soi deadlock: `SHOW ENGINE INNODB STATUS\G` → mục `LATEST DETECTED DEADLOCK`
 
 **Pool size bao nhiêu là đủ?** Không phải càng lớn càng tốt. Công thức tham khảo của HikariCP: `connections ≈ (số core CPU của DB × 2) + số ổ đĩa`. Pool quá lớn làm DB tốn thời gian chuyển ngữ cảnh và tranh chấp khoá nhiều hơn. Hãy đo: chạy load test với pool 10, 20, 50 rồi so sánh.
 
+**⚠️ Virtual threads có thể làm app treo hẳn.** Dự án 2 (ledger) đã gặp: 200 request đầu tiên đến cùng lúc làm
+JVM nạp class lần đầu. Nạp class do JVM khởi phát đi qua native frame nên virtual thread bị **ghim (pin)** vào carrier
+thread trong lúc chờ khoá nạp class. 12/12 carrier bị ghim, còn virtual thread đang giữ khoá thì không có carrier để
+chạy tiếp, nên app sống mà không xử lý request nào. JDK 24 (JEP 491) đã hết pin với `synchronized`, nhưng **nạp/khởi
+tạo class vẫn pin**. Khi DB chỉ có 20 connection thì virtual threads gần như không đem lại gì, platform threads an
+toàn hơn. Dự án này giữ virtual threads (số đo dùng cấu hình đó), bật/tắt qua biến `VIRTUAL_THREADS`.
+
 **Fail fast:** `connection-timeout: 5000`. Hết connection thì sau 5s trả **503 "Server busy"** thay vì treo 30s. Client và load balancer thấy 503 sẽ biết cần retry hoặc giảm tải. Xem `GlobalExceptionHandler`.
 
 **Tắt Open Session In View** (`open-in-view: false`): nếu bật, mỗi request HTTP giữ 1 connection DB từ đầu đến cuối, kể cả lúc serialize JSON. Pool cạn rất nhanh.
@@ -250,7 +257,28 @@ Mỗi lượt: reset kho, bắn N request (mỗi request 1 user khác nhau), đo
 
 ## 10. Kết quả benchmark
 
-> Sẽ được điền sau khi chạy `node flash-sale-load.mjs --all` trên máy local.
+20.000 request, 500 đồng thời, 1.000 vé, warm-up 10.000 request. Laptop Ryzen 5 5625U, app + MySQL + Node chung 1 máy.
+
+| cách | RPS | RPS qua 3 lần chạy | p95 (ms) | đơn tạo | bán lố | kết quả |
+|---|---:|---:|---:|---:|---:|---|
+| NAIVE | 113 | 113 – 131 | 6.739 | 19.806 | 18.806 | ❌ |
+| SYNCHRONIZED | 671 | 636 – 671 | 3.872 | 2.000 | 1.000 | ❌ |
+| PESSIMISTIC | 802 | 773 – 869 | 2.457 | 1.000 | 0 | ✅ |
+| OPTIMISTIC | 593 | 590 – 600 | 4.749 | 1.000 | 0 | ✅ (1.326 người bị từ chối oan) |
+| ATOMIC_UPDATE | 764 | 764 – 928 | 2.520 | 1.000 | 0 | ✅ |
+
+**Những điều số liệu dạy:**
+1. **SYNCHRONIZED ra đúng 2.000, lần nào cũng vậy.** Mỗi lần kho giảm, đúng 1 thread nữa lọt vào khe giữa "nhả
+   khoá" và "commit", đọc giá trị cũ, nên mỗi vé bị bán 2 lần.
+2. **NAIVE chậm nhất** vì không ai bị từ chối sớm: kho gần như không giảm, nên 20.000 request đều INSERT đơn.
+3. **ATOMIC ≈ PESSIMISTIC.** 95% request đến sau khi hết vé, nhưng cả 2 cách vẫn lấy X lock trên dòng tồn kho cho
+   từng request. Ở REPEATABLE READ, `UPDATE ... WHERE id = 1 AND stock > 0` vẫn khoá dòng id = 1 tới khi commit dù
+   điều kiện không khớp. (Giả thuyết chưa đo: READ COMMITTED có "semi-consistent read", nhả khoá dòng không khớp sớm hơn.)
+4. **Pool size 5 → 100 không tạo khác biệt đo được** (600–730 RPS, nằm trong nhiễu). Hot row là nút cổ chai;
+   thêm connection chỉ chuyển chỗ xếp hàng từ Hikari vào InnoDB.
+5. **Đo sai trước khi đo đúng:** quên warm-up JVM (mọi cấu hình đều ~550 RPS), đo 1 lần (chênh tới 30% giữa các lần).
+
+→ Hướng đi tiếp theo rõ ràng: **đừng để request "hết hàng" chạm DB** (phase 2: cờ hết hàng + Redis).
 
 ---
 
@@ -300,7 +328,14 @@ Ví dụ thật trong dự án: FK + thứ tự flush của Hibernate (mục 7).
 <details><summary><b>Q7. Virtual threads có làm hệ thống nhanh hơn không?</b></summary>
 
 Không làm từng request nhanh hơn. Chúng giúp phục vụ **nhiều request chờ IO đồng thời** với ít tài nguyên.
-Nút cổ chai vẫn là connection pool và DB.
+Nút cổ chai vẫn là connection pool và DB. Rủi ro cần biết: **pinning** (native frame, nạp class) có thể ghim hết
+carrier thread và làm app treo; dự án 2 đã gặp và ghi lại thread dump.
+</details>
+
+<details><summary><b>Q8. Tăng connection pool có giúp hệ thống chịu tải tốt hơn?</b></summary>
+
+Chỉ khi nút cổ chai là số connection. Ở đây đo pool 5 → 100 không khác biệt, vì mọi request tranh 1 dòng (hot row).
+Pool quá lớn còn làm DB tốn thời gian chuyển ngữ cảnh và tranh khoá. Luôn **đo** trước khi chỉnh.
 </details>
 
 ---

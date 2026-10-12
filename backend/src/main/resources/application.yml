@@ -21,9 +21,11 @@ spring:
       ddl-auto: validate
 
   # Java 21 virtual threads: mỗi request 1 virtual thread, chịu được hàng chục nghìn request chờ IO.
+  # Số đo trong README dùng cấu hình này. Lưu ý rủi ro "pinning" khi nạp class lần đầu dưới tải cao:
+  # dự án ewallet-ledger-spring-boot đã gặp app treo hoàn toàn vì nó (xem KNOWLEDGE.md mục 8).
   threads:
     virtual:
-      enabled: true
+      enabled: ${VIRTUAL_THREADS:true}
 
 management:
   endpoints:
