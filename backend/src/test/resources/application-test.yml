@@ -1,0 +1,4 @@
+spring:
+  datasource:
+    # Database riêng cho test: test xoá/đặt lại dữ liệu thoải mái mà không ảnh hưởng DB dev.
+    url: ${TEST_DB_URL:jdbc:mysql://localhost:3306/flash_sale_test?allowPublicKeyRetrieval=true&useSSL=false}
