@@ -3,9 +3,9 @@ package com.duong.flashsale.common;
 import com.duong.flashsale.item.ItemNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.dao.PessimisticLockingFailureException;
-import org.springframework.dao.QueryTimeoutException;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.transaction.CannotCreateTransactionException;
@@ -30,11 +30,15 @@ public class GlobalExceptionHandler {
     /**
      * Quá tải: hết connection trong pool (Hikari timeout), chờ khoá quá lâu hoặc bị chọn làm nạn nhân deadlock.
      * Trả 503 để client/load balancer biết là "thử lại sau", không phải lỗi logic.
+     *
+     * <p>Hết connection có 2 dạng: lúc mở transaction => CannotCreateTransactionException;
+     * lúc query ngoài transaction (vd. bước kiểm tra nhanh) => DataAccessResourceFailureException.
+     * TransientDataAccessException bao gồm deadlock, lock wait timeout, query timeout.
      */
     @ExceptionHandler({
             CannotCreateTransactionException.class,
-            PessimisticLockingFailureException.class,
-            QueryTimeoutException.class
+            DataAccessResourceFailureException.class,
+            TransientDataAccessException.class
     })
     public ProblemDetail handleOverload(RuntimeException e) {
         log.warn("Overloaded: {}", e.getMessage());
